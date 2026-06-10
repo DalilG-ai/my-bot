@@ -2,6 +2,7 @@ import logging
 import random
 import json
 import os
+import aiohttp
 from datetime import time, datetime, date
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -16,17 +17,16 @@ from telegram.ext import (
 # ========================
 # НАСТРОЙКИ
 # ========================
-BOT_TOKEN = "8276751042:AAHF01RI636XQvoqANRXQMytnFY0h9ZbKJ8"  # Получи у @BotFather
-DATA_FILE = "users_data.json"           # Файл для хранения данных
+BOT_TOKEN = "8276751042:AAHF01RI636XQvoqANRXQMytnFY0h9ZbKJ8"
+DATA_FILE = "users_data.json"
 
-# Время уведомлений (UTC, МСК = UTC+3)
 SEND_TIMES = [
-    time(4, 0),   # 07:00 МСК
-    time(7, 0),   # 10:00 МСК
-    time(10, 0),  # 13:00 МСК
-    time(13, 0),  # 16:00 МСК
-    time(16, 0),  # 19:00 МСК
-    time(18, 0),  # 21:00 МСК
+    time(4, 0),
+    time(7, 0),
+    time(10, 0),
+    time(13, 0),
+    time(16, 0),
+    time(18, 0),
 ]
 
 # ========================
@@ -86,7 +86,8 @@ MOTIVATION_QUOTES = [
     WAITING_RESULT,
     WAITING_RESTORE,
     WAITING_SURRENDER,
-) = range(7)
+    WAITING_PRICE_SYMBOL,
+) = range(8)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -134,14 +135,13 @@ def update_user(user_id: int, fields: dict):
     save_data(data)
 
 def check_and_update_streak(user_id: int) -> tuple[int, bool]:
-    """Проверяет стрик, возвращает (streak, streak_lost)"""
     user = get_user(user_id)
     today = date.today().isoformat()
     last = user.get("last_active", "")
     streak = user.get("streak", 0)
 
     if last == today:
-        return streak, False  # уже активен сегодня
+        return streak, False
 
     if last == "":
         update_user(user_id, {"streak": 1, "last_active": today})
@@ -170,7 +170,6 @@ def get_quote(religion: str) -> str:
         title, text = random.choice(BIBLE_QUOTES)
         return f"📖 {title}\n\n{text}"
     else:
-        # Без религии — микс всего
         roll = random.random()
         if roll < 0.33:
             title, text = random.choice(QURAN_QUOTES)
@@ -228,6 +227,7 @@ def get_main_keyboard():
         [KeyboardButton("🔥 Мой огонёк"), KeyboardButton("📖 Цитата сейчас")],
         [KeyboardButton("😤 Хочу сдаться"), KeyboardButton("🧠 Поговорить")],
         [KeyboardButton("🏆 Мои победы"), KeyboardButton("🎯 Моя цель")],
+        [KeyboardButton("💹 Цена монеты")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -237,6 +237,121 @@ def get_religion_keyboard():
         [KeyboardButton("🌍 Без религии")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+# ========================
+# ЦЕНЫ НА БИРЖАХ
+# ========================
+async def fetch_price_bingx(symbol: str) -> float | None:
+    url = f"https://open-api.bingx.com/openApi/swap/v2/quote/price?symbol={symbol}-USDT"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return float(data["data"]["price"])
+    except Exception:
+        return None
+
+async def fetch_price_mexc(symbol: str) -> float | None:
+    url = f"https://api.mexc.com/api/v3/ticker/price?symbol={symbol}USDT"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return float(data["price"])
+    except Exception:
+        return None
+
+async def fetch_price_gate(symbol: str) -> float | None:
+    url = f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={symbol}_USDT"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return float(data[0]["last"])
+    except Exception:
+        return None
+
+async def fetch_price_htx(symbol: str) -> float | None:
+    url = f"https://api.huobi.pro/market/detail/merged?symbol={symbol.lower()}usdt"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return float(data["tick"]["close"])
+    except Exception:
+        return None
+
+async def get_prices(symbol: str) -> dict:
+    import asyncio
+    results = await asyncio.gather(
+        fetch_price_bingx(symbol),
+        fetch_price_mexc(symbol),
+        fetch_price_gate(symbol),
+        fetch_price_htx(symbol),
+    )
+    return {
+        "BingX": results[0],
+        "MEXC":  results[1],
+        "Gate":  results[2],
+        "HTX":   results[3],
+    }
+
+def format_price_message(symbol: str, prices: dict) -> str:
+    valid = {k: v for k, v in prices.items() if v is not None}
+
+    if not valid:
+        return f"❌ Не удалось получить цены для *{symbol}*. Проверь название монеты."
+
+    max_price = max(valid.values())
+    min_price = min(valid.values())
+    max_diff_pct = ((max_price - min_price) / min_price) * 100
+
+    lines = [f"💹 *{symbol.upper()}/USDT*\n"]
+    for exchange, price in prices.items():
+        if price is None:
+            lines.append(f"  {exchange}: ❌ недоступно")
+        else:
+            diff = ((price - max_price) / max_price) * 100
+            if diff == 0:
+                lines.append(f"  {exchange}: `${price:,.4f}` ✅ макс")
+            else:
+                lines.append(f"  {exchange}: `${price:,.4f}` ({diff:+.3f}%)")
+
+    lines.append(f"\n📊 Макс разница: *{max_diff_pct:.3f}%*")
+
+    if max_diff_pct >= 0.3:
+        lines.append("⚡ Арбитраж возможен!")
+
+    return "\n".join(lines)
+
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Введи символ монеты, например:\n`BTC`, `ETH`, `SOL`, `BNB`",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Назад")]], resize_keyboard=True)
+    )
+    return WAITING_PRICE_SYMBOL
+
+async def handle_price_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "⬅️ Назад":
+        await update.message.reply_text("Главное меню 😊", reply_markup=get_main_keyboard())
+        return ConversationHandler.END
+
+    symbol = text.upper().replace("USDT", "").replace("/", "").strip()
+
+    msg = await update.message.reply_text(f"⏳ Получаю цены для *{symbol}*...", parse_mode="Markdown")
+
+    prices = await get_prices(symbol)
+    result = format_price_message(symbol, prices)
+
+    await msg.edit_text(result, parse_mode="Markdown")
+    await update.message.reply_text(
+        "Введи другой символ или вернись назад:",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Назад")]], resize_keyboard=True)
+    )
+    return WAITING_PRICE_SYMBOL
 
 # ========================
 # ОНБОРДИНГ
@@ -562,38 +677,32 @@ async def handle_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # АВТОМАТИЧЕСКИЕ УВЕДОМЛЕНИЯ
 # ========================
 SCHEDULED_MESSAGES = [
-    # 07:00 — утро
     lambda user: (
         f"🌅 Доброе утро!\n\n"
         f"{get_quote(user['religion'])}\n\n"
         f"🔥 День {user['streak']} — огонёк горит!\n\n"
         f"Что сделаешь сегодня для своей цели?\n*\"{user['goal']}\"*"
     ),
-    # 10:00
     lambda user: (
         f"☀️ *{user['bot_name']}:* Как утро? Уже сделал первый шаг?\n\n"
         f"🎯 Помни: *\"{user['goal']}\"*\n\n"
         f"{get_quote(user['religion'])}"
     ),
-    # 13:00
     lambda user: (
         f"🕐 Середина дня!\n\n"
         f"{get_quote(user['religion'])}\n\n"
         f"🔥 Огонёк горит уже *{user['streak']}* дней. Не гаси его сегодня!"
     ),
-    # 16:00
     lambda user: (
         f"💪 *{user['bot_name']}:* Ещё пару часов до конца дня.\n\n"
         f"Сделай хоть один маленький шаг для:\n*\"{user['goal']}\"*\n\n"
         f"{get_quote(user['religion'])}"
     ),
-    # 19:00
     lambda user: (
         f"🌆 Вечереет...\n\n"
         f"{get_quote(user['religion'])}\n\n"
         f"*{user['bot_name']}:* Как прошёл день? Сделал что-то для цели?"
     ),
-    # 21:00 — итог + огонёк
     lambda user: (
         f"🌙 Итог дня\n\n"
         f"🔥 *{get_streak_label(user['religion'])}: {user['streak']} дней*\n\n"
@@ -640,7 +749,7 @@ async def scheduled_notification(context: ContextTypes.DEFAULT_TYPE):
 def schedule_daily_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     job_queue = context.application.job_queue
     if job_queue is None:
-        logger.error("JobQueue не доступен! Установи: pip install 'python-telegram-bot[job-queue]'")
+        logger.error("JobQueue не доступен!")
         return
     for i, send_time in enumerate(SEND_TIMES):
         job_name = f"daily_{chat_id}_{send_time.hour}"
@@ -667,14 +776,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Напиши /start чтобы начать! 😊")
         return
 
-    # Обновляем стрик при любом ответе
     streak, lost = check_and_update_streak(user_id)
 
     if text == "🔥 Мой огонёк":
-        if user.get("streak", 0) == 0 and not user.get("restore_used"):
-            await show_streak(update, context)
-        else:
-            await show_streak(update, context)
+        await show_streak(update, context)
     elif text == "📖 Цитата сейчас":
         await send_quote(update, context)
     elif text == "🎯 Моя цель":
@@ -700,7 +805,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Онбординг
     onboarding = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -714,7 +818,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # Сдаться
     surrender_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^😤 Хочу сдаться$"), want_to_surrender)],
         states={
@@ -723,7 +826,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # Победы
     victories_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🏆 Мои победы$"), my_victories)],
         states={
@@ -732,7 +834,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # Восстановление стрика
     restore_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🔥 Мой огонёк$"), restore_streak_ask)],
         states={
@@ -741,10 +842,19 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    price_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💹 Цена монеты$"), price_command)],
+        states={
+            WAITING_PRICE_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_price_symbol)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     app.add_handler(onboarding)
     app.add_handler(surrender_handler)
     app.add_handler(victories_handler)
     app.add_handler(restore_handler)
+    app.add_handler(price_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("🤖 Бот запущен! Нажми Ctrl+C для остановки.")
