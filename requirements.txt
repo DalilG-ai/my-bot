@@ -1,1 +1,5 @@
-python-telegram-bot[job-queue]==21.9
+python-telegram-bot[job-queue]>=22.8
+ccxt>=4.3.0
+telethon>=1.36.0
+anthropic>=0.40.0
+python-dotenv>=1.0.0
