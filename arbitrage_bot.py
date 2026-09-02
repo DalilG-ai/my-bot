@@ -20,8 +20,13 @@ import os
 import time
 
 import ccxt.async_support as ccxt
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# Подхватывает переменные из .env, если такой файл лежит рядом со скриптом
+# (сам файл в git не попадает — см. .gitignore). Если .env нет, ничего не делает.
+load_dotenv()
 
 # ============ НАСТРОЙКИ: БИРЖИ ============
 
