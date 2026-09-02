@@ -37,6 +37,11 @@ if not BOT_TOKEN:
         "(токен от @BotFather, не храните его в коде)."
     )
 
+# Если api.telegram.org недоступен напрямую (блокировки/троттлинг у провайдера),
+# укажите здесь HTTP- или SOCKS5-прокси, например http://127.0.0.1:8080
+# или socks5://127.0.0.1:1080
+TELEGRAM_PROXY_URL = os.environ.get("TELEGRAM_PROXY_URL")
+
 EXCHANGES = ["binance", "bybit", "okx", "kucoin", "gateio", "mexc", "htx", "bitget"]
 MIN_SPREAD_PERCENT = 1.0
 CHECK_INTERVAL = 45  # секунд
@@ -306,7 +311,11 @@ def main():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
+    builder = Application.builder().token(BOT_TOKEN).post_init(on_startup)
+    if TELEGRAM_PROXY_URL:
+        builder = builder.proxy(TELEGRAM_PROXY_URL).get_updates_proxy(TELEGRAM_PROXY_URL)
+        logger.info("Использую прокси: %s", TELEGRAM_PROXY_URL)
+    app = builder.build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
     logger.info("Бот запускается...")
