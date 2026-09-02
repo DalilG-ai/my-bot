@@ -297,6 +297,15 @@ async def on_startup(app: Application):
 
 
 def main():
+    # На Python 3.14 больше не создаётся event loop в основном потоке сам
+    # по себе, а часть кода python-telegram-bot всё ещё вызывает
+    # asyncio.get_event_loop() напрямую. Создаём и выставляем loop заранее,
+    # чтобы такой вызов не падал с RuntimeError.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("stop", cmd_stop))
